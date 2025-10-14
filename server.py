@@ -2,6 +2,7 @@ import configparser
 import asyncio
 import random
 import socket
+import ctypes
 import uuid
 
 SERVER_ID = f"snake_game_server-{uuid.uuid4().hex[:8]}"
@@ -10,6 +11,7 @@ UDP_PORT = 9999
 DISCOVERY_REQUEST = b"DISCOVER_SNAKE_GAME"
 DISCOVERY_RESPONSE_PREFIX = b"SNAKE_GAME_HERE"
 CONFIG_PATH = "config.ini"
+BYTE_CODE_SHIFT = 100
 
 
 def get_local_ip():
@@ -25,7 +27,7 @@ async def udp_responder():
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
-    sock.bind(("", UDP_PORT))
+    sock.bind(("0.0.0.0", UDP_PORT))
 
     local_ip = get_local_ip()
     loop = asyncio.get_event_loop()
@@ -34,9 +36,11 @@ async def udp_responder():
     while True:
         try:
             data, addr = await loop.sock_recvfrom(sock, 1024)
+            print(f"UDP get {data} from {addr}")
             if data == DISCOVERY_REQUEST:
                 response = f"{DISCOVERY_RESPONSE_PREFIX.decode()}|{SERVER_ID}|{local_ip}".encode()
                 await loop.sock_sendto(sock, response, addr)
+                # print(f"UDP server sent answer to {addr}")
         except Exception as e:
             print(f"Error in UDP: {e}")
 
@@ -181,6 +185,7 @@ class game:
 
     def get_string(self):
         grid = self.construc_grid()
+        self.prev_grid = grid
         grid_code = ""
         for l in grid:
             f = ""
@@ -189,6 +194,17 @@ class game:
             grid_code += f[:-1] + ":"
         message = f"{self.width}|{self.height}|{grid_code[:-1]}"
         return message
+
+    def get_delta(self):
+        grid = self.construc_grid()
+        res = b""
+        for x in range(self.width):
+            for y in range(self.height):
+                if grid[x][y] != self.prev_grid[x][y]:
+                    res += bytes([x + BYTE_CODE_SHIFT, y + BYTE_CODE_SHIFT])
+                    res += grid[x][y].encode()
+        self.prev_grid = grid
+        return res.decode()
 
     def apply_direct(self, num, ndir):
         pdir = self.prev_dir[num]
@@ -240,9 +256,9 @@ async def write(client, message, timeout=1.0):
     if message.startswith("STATE"):
         fmes = message.split("|")[0]
     if "num" in client:
-        print(f"{fmes} is writed to {client["num"]}")
+        print(f"{fmes} is writed to {client["num"]} (length = {len(message)})")
     else:
-        print(f"{fmes} is writed")
+        print(f"{fmes} is writed (length = {len(message)})")
 
     client["writer"].write(message.strip().encode() + b"\n")
     await asyncio.wait_for(client["writer"].drain(), timeout=timeout)
@@ -300,7 +316,10 @@ class server:
             return [""] * len(self.clients)
 
     async def send_state(self, prefix):
-        message = f"{prefix}|{self.game.get_string()}"
+        if prefix == "STATE_INIT":
+            message = f"{prefix}|{self.game.get_string()}"
+        else:
+            message = f"{prefix}|{self.game.get_delta()}"
         await self.write_all(message)
 
     async def dir_reader(self, client):
@@ -345,7 +364,7 @@ class server:
         await self.write_all("SPACE_AWAIT")
         ans = await self.read_all()
         for client in self.clients:
-            print(f"PING from {client["num"]} = {check_ping(client)}")
+            print(f"PING from {client["num"]} = {(await check_ping(client)):.4f}")
             if ans[client["num"]] != "SPACE_PRESSED":
                 self.state = "wait_clients"
         self.state = "game_start"

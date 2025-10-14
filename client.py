@@ -6,6 +6,7 @@ TCP_PORT = 8888
 UDP_PORT = 9999
 DISCOVERY_REQUEST = b"DISCOVER_SNAKE_GAME"
 DISCOVERY_RESPONSE_PREFIX = b"SNAKE_GAME_HERE"
+BYTE_CODE_SHIFT = 100
 
 key_to_dir = {
     pygame.K_RIGHT: "R",
@@ -38,26 +39,23 @@ class network_client:
         finally:
             s.close()
 
-    async def get_server_list(self, timeout=2.0):
+    async def get_server_list(self, broadcast_addr, timeout=2.0):
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
-        sock.setblocking(1)
+        sock.setblocking(False)
 
         loop = asyncio.get_event_loop()
-        print("browsing servers...")
-        my_ip = self.get_local_ip()
-        parts = my_ip.split(".")
-        broadcast = f"{parts[0]}.{parts[1]}.{parts[2]}.255"
+        print(f"browsing servers on {broadcast_addr} ...")
         await loop.run_in_executor(
             None,
             sock.sendto,
             DISCOVERY_REQUEST,
-            (broadcast, UDP_PORT),
+            (broadcast_addr, UDP_PORT),
         )
         servers = []
-        try:
-            start_time = loop.time()
-            while loop.time() - start_time < timeout:
+        start_time = loop.time()
+        while loop.time() - start_time < timeout:
+            try:
                 local_timout = timeout - (loop.time() - start_time)
                 data = await asyncio.wait_for(
                     loop.sock_recv(sock, 1024), timeout=local_timout
@@ -70,19 +68,36 @@ class network_client:
                             servers.append((ip, server_id))
                     except Exception:
                         pass
-        except asyncio.TimeoutError:
-            pass
-        finally:
-            sock.close()
+            except asyncio.TimeoutError:
+                break
+            except OSError as e:
+                if hasattr(e, "winerror") and e.winerror == 10054:
+                    print("aboba")
+                    pass
+                else:
+                    raise
+        sock.close()
         return servers
 
     async def choose_server(self):
-        servers = await self.get_server_list()
-        if len(servers) == 0:
+        my_ip = self.get_local_ip()
+        parts = my_ip.split(".")
+        broadcast = f"{parts[0]}.{parts[1]}.{parts[2]}.255"
+        local_task = asyncio.create_task(self.get_server_list("127.0.0.1"))
+        network_task = asyncio.create_task(self.get_server_list(broadcast))
+        local_servers, network_servers = await asyncio.gather(
+            local_task,
+            network_task,
+        )
+        if len(local_servers) == 1:
+            return local_servers[0][0]
+        if len(network_servers) == 1:
+            return network_servers[0][0]
+        gen_count = len(local_servers) + len(network_servers)
+        if gen_count == 0:
             raise Exception("There is no servers")
-        if len(servers) > 1:
-            raise Exception("more than 1 server")
-        return servers[0][0]
+        else:
+            raise Exception("More than 1 server")
 
     async def read(self):
         message = (await self.reader.readline()).decode().strip()
@@ -131,6 +146,16 @@ class game_client:
                 pygame.draw.rect(self.screen, code_to_color[grid[x][y]], rect)
         pygame.display.flip()
 
+    def draw_delta(self, data):
+        print(bytes(data))
+        for i in range(0, len(data), 3):
+            x, y, c = data[i : i + 3]
+            x -= BYTE_CODE_SHIFT
+            y -= BYTE_CODE_SHIFT
+            rect = pygame.Rect(x * self.cell, y * self.cell, self.cell, self.cell)
+            pygame.draw.rect(self.screen, code_to_color[chr(c)], rect)
+        pygame.display.flip()
+
     def get_dir(self):
         if len(self.que) == 0:
             return self.prev_dir
@@ -149,13 +174,16 @@ class client:
 
     def parse_grid(self, message):
         blocks = message.split("|")
-        width = int(blocks[1])
-        height = int(blocks[2])
-        grid = [p.split(",") for p in blocks[3].split(":")]
         if blocks[0] == "STATE_INIT":
+            width = int(blocks[1])
+            height = int(blocks[2])
+            grid = [p.split(",") for p in blocks[3].split(":")]
             self.display.resize((width, height))
             self.read_arrows = True
-        self.display.draw_grid(grid)
+            self.display.draw_grid(grid)
+        else:
+            data = list(blocks[1].encode())
+            self.display.draw_delta(data)
 
     async def space_await(self):
         self.space_pressed.clear()
@@ -171,7 +199,7 @@ class client:
                         self.space_pressed.set()
                     if event.key in key_to_dir and self.read_arrows:
                         await self.network.write(key_to_dir[event.key])
-            await asyncio.sleep(0.1)
+            await asyncio.sleep(0.01)
 
     async def handler(self):
         while True:
