@@ -52,8 +52,9 @@ def load_config(path="config.ini"):
         "game": {
             "width": config.getint("game", "width"),
             "height": config.getint("game", "height"),
-            "number_of_players": config.getint("game", "number_of_players"),
+            "players_number": config.getint("game", "players_number"),
             "turn_time": config.getfloat("game", "turn_time"),
+            "apples_number": config.getint("game", "apples_number"),
         }
     }
 
@@ -105,16 +106,12 @@ snake_num_to_col = ["cC", "dD"]
 
 
 class game:
-    def __init__(self):
-        self.apple = point(-1, -1)
-
     def build_start_pos(self):
-        # build snakes
-        if self.number_of_players == 1:
+        if self.players_number == 1:
             y = self.height // 2
             self.snakes = [[point(0, y), point(1, y), point(2, y)]]
             self.prev_dir = ["R"]
-        elif self.number_of_players == 2:
+        elif self.players_number == 2:
             x = self.width - 1
             y = self.height - 2
             self.snakes = [
@@ -122,26 +119,37 @@ class game:
                 [point(x, y), point(x - 1, y), point(x - 2, y)],
             ]
             self.prev_dir = ["R", "L"]
-        self.que = [[] for i in range(self.number_of_players)]
+        self.que = [[] for i in range(self.players_number)]
         self.end_game = False
-        self.gen_apple()
+        self.apples = []
+        self.gen_apples()
 
-    def gen_apple(self):
+    def gen_apples(self):
+        while len(self.apples) < self.apples_number:
+            p = self.get_free_cell()
+            if p:
+                self.apples.append(p)
+            else:
+                break
+        if len(self.apples) == 0:
+            self.end_game = True
+
+    def get_free_cell(self):
         free = []
         for x in range(self.width):
             for y in range(self.height):
-                if not self.is_under_snake(point(x, y)):
-                    free.append(point(x, y))
-        self.apple = None
+                p = point(x, y)
+                if not self.is_under_snake(p) and p not in self.apples:
+                    free.append(p)
         if len(free) == 0:
-            self.end_game = True
+            return None
         else:
-            self.apple = random.choice(free)
+            return random.choice(free)
 
     def construc_grid(self):
         grid = [["."] * self.height for _ in range(self.width)]
-        if self.apple:
-            grid[self.apple.x][self.apple.y] = "A"
+        for apple in self.apples:
+            grid[apple.x][apple.y] = "A"
         for num in range(len(self.snakes)):
             for segm in self.snakes[num]:
                 is_head = 0
@@ -157,7 +165,6 @@ class game:
         return False
 
     def make_turn(self):
-        ate_apple = False
         for num in range(len(self.snakes)):
             dir = self.prev_dir[num]
             if len(self.que[num]) > 0:
@@ -168,20 +175,19 @@ class game:
             if not new_head.in_bound(self.width, self.height):
                 self.end_game = True
                 return
-            if new_head != self.apple:
+            if new_head not in self.apples:
                 self.snakes[num] = self.snakes[num][1:]
-            else:
-                ate_apple = True
             self.snakes[num].append(new_head)
         for num in range(len(self.snakes)):
             head = self.snakes[num][-1]
+            if head in self.apples:
+                self.apples.remove(head)
             self.snakes[num] = self.snakes[num][:-1]
             if self.is_under_snake(head):
                 self.end_game = True
             else:
                 self.snakes[num].append(head)
-        if ate_apple:
-            self.gen_apple()
+        self.gen_apples()
 
     def get_string(self):
         grid = self.construc_grid()
@@ -217,16 +223,17 @@ class game:
         while True:
             try:
                 game_config = load_config()["game"]
-                self.number_of_players = game_config["number_of_players"]
-                if not (self.number_of_players in {1, 2}):
+                self.players_number = game_config["players_number"]
+                if not (self.players_number in {1, 2}):
                     raise ValueError("number of players must be 1 or 2")
                 self.width = game_config["width"]
-                if not (self.width >= 9):
-                    raise ValueError("width must be at least 9")
+                if not (self.width >= 4):
+                    raise ValueError("width must be at least 4")
                 self.height = game_config["height"]
-                if not (self.height >= 9):
-                    raise ValueError("height must be at least 9")
+                if not (self.height >= 4):
+                    raise ValueError("height must be at least 4")
                 self.turn_time = game_config["turn_time"]
+                self.apples_number = game_config["apples_number"]
                 self.build_start_pos()
                 return
             except Exception as e:
@@ -259,7 +266,6 @@ async def write(client, message, timeout=1.0):
         print(f"{fmes} is writed to {client["num"]} (length = {len(message)})")
     else:
         print(f"{fmes} is writed (length = {len(message)})")
-
     client["writer"].write(message.strip().encode() + b"\n")
     await asyncio.wait_for(client["writer"].drain(), timeout=timeout)
 
@@ -280,7 +286,7 @@ class server:
             }
             self.clients.append(client)
             await write(client, "ok")
-            if len(self.clients) == self.game.number_of_players:
+            if len(self.clients) == self.game.players_number:
                 self.wait_clients_event.set()
         else:
             writer.write(b"Game already started\n")
@@ -349,10 +355,10 @@ class server:
             pass
         await self.stop_readers()
         await self.check_clients()
-        if len(self.clients) > self.game.number_of_players:
-            self.clients = self.clients[: self.game.number_of_players]
+        if len(self.clients) > self.game.players_number:
+            self.clients = self.clients[: self.game.players_number]
         self.wait_clients_event.clear()
-        if len(self.clients) == self.game.number_of_players:
+        if len(self.clients) == self.game.players_number:
             self.wait_clients_event.set()
         await self.wait_clients_event.wait()
         for i in range(len(self.clients)):
@@ -379,7 +385,7 @@ class server:
             asyncio.create_task(self.dir_reader(client))
 
     async def game_cycle(self):
-        current_turn = 0
+        self.turn = 0
         while self.state == "game_cycle":
             turn_start = asyncio.get_event_loop().time()
 
@@ -393,10 +399,10 @@ class server:
             elapsed = asyncio.get_event_loop().time() - turn_start
             sleep_time = self.game.turn_time - elapsed
             if sleep_time < 0:
-                print(f"Turn {current_turn} lag: {-sleep_time:.3f}s")
+                print(f"Turn {self.turn} lag: {-sleep_time:.3f}s")
             else:
                 await asyncio.sleep(sleep_time)
-            current_turn += 1
+            self.turn += 1
 
     async def run(self):
         while True:

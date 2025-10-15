@@ -147,7 +147,6 @@ class game_client:
         pygame.display.flip()
 
     def draw_delta(self, data):
-        print(bytes(data))
         for i in range(0, len(data), 3):
             x, y, c = data[i : i + 3]
             x -= BYTE_CODE_SHIFT
@@ -175,6 +174,7 @@ class client:
     def parse_grid(self, message):
         blocks = message.split("|")
         if blocks[0] == "STATE_INIT":
+            self.turn = 0
             width = int(blocks[1])
             height = int(blocks[2])
             grid = [p.split(",") for p in blocks[3].split(":")]
@@ -182,6 +182,7 @@ class client:
             self.read_arrows = True
             self.display.draw_grid(grid)
         else:
+            self.turn += 1
             data = list(blocks[1].encode())
             self.display.draw_delta(data)
 
@@ -218,7 +219,7 @@ class client:
             if not message.startswith("STATE"):
                 print(message)
             else:
-                print(message.split("|")[0])
+                print(message.split("|")[0], self.turn)
 
     async def create(self):
         await self.network.create()
