@@ -72,7 +72,7 @@ class network_client:
                 break
             except OSError as e:
                 if hasattr(e, "winerror") and e.winerror == 10054:
-                    print("aboba")
+                    print("Reached WinError[10054]")
                     pass
                 else:
                     raise
@@ -181,10 +181,14 @@ class client:
             self.display.resize((width, height))
             self.read_arrows = True
             self.display.draw_grid(grid)
+            self.time = asyncio.get_event_loop().time()
         else:
             self.turn += 1
             data = list(blocks[1].encode())
             self.display.draw_delta(data)
+            cur_time = asyncio.get_event_loop().time()
+            self.delta = cur_time - self.time
+            self.time = cur_time
 
     async def space_await(self):
         self.space_pressed.clear()
@@ -216,10 +220,12 @@ class client:
                 self.read_arrows = False
             elif message == "PING":
                 await self.network.write("PONG")
-            if not message.startswith("STATE"):
-                print(message)
+            if message.startswith("STATE|"):
+                print(f"STATE {self.turn}: {self.delta:.3f}")
+            elif message.startswith("STATE_INIT"):
+                print("STATE_INIT")
             else:
-                print(message.split("|")[0], self.turn)
+                print(message)
 
     async def create(self):
         await self.network.create()

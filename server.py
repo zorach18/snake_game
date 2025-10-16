@@ -2,7 +2,6 @@ import configparser
 import asyncio
 import random
 import socket
-import ctypes
 import uuid
 
 SERVER_ID = f"snake_game_server-{uuid.uuid4().hex[:8]}"
@@ -40,9 +39,8 @@ async def udp_responder():
             if data == DISCOVERY_REQUEST:
                 response = f"{DISCOVERY_RESPONSE_PREFIX.decode()}|{SERVER_ID}|{local_ip}".encode()
                 await loop.sock_sendto(sock, response, addr)
-                # print(f"UDP server sent answer to {addr}")
         except Exception as e:
-            print(f"Error in UDP: {e}")
+            print(f"Error in UDP: {repr(e)}")
 
 
 def load_config(path="config.ini"):
@@ -55,6 +53,7 @@ def load_config(path="config.ini"):
             "players_number": config.getint("game", "players_number"),
             "turn_time": config.getfloat("game", "turn_time"),
             "apples_number": config.getint("game", "apples_number"),
+            "has_bound": config.getboolean("game", "has_bound"),
         }
     }
 
@@ -76,6 +75,10 @@ class point:
 
     def in_bound(self, width, height):
         return (0 <= self.x and self.x < width) and (0 <= self.y and self.y < height)
+
+    def move_in(self, width, height):
+        self.x %= width
+        self.y %= height
 
     def __eq__(self, other):
         return self.x == other.x and self.y == other.y
@@ -172,6 +175,8 @@ class game:
                 self.que[num] = self.que[num][1:]
             self.prev_dir[num] = dir
             new_head = self.snakes[num][-1] + dir_to_ds[dir]
+            if not self.has_bound:
+                new_head.move_in(self.width, self.height)
             if not new_head.in_bound(self.width, self.height):
                 self.end_game = True
                 return
@@ -234,18 +239,28 @@ class game:
                     raise ValueError("height must be at least 4")
                 self.turn_time = game_config["turn_time"]
                 self.apples_number = game_config["apples_number"]
+                self.has_bound = game_config["has_bound"]
                 self.build_start_pos()
                 return
             except Exception as e:
-                print(f"error: {e}")
+                print(f"error in config: {e}")
                 await open_notepad(CONFIG_PATH)
 
 
 async def read(client):
-    data = await client["reader"].readline()
-    message = data.decode().strip()
-    if message == "":
-        raise Exception("client closed connection")
+    try:
+        data = await client["reader"].readline()
+        message = data.decode().strip()
+        if message == "":
+            raise Exception("client closed connection")
+    except Exception as e:
+        args = e.args + (
+            "connection lost",
+            "while reading",
+        )
+        if "num" in client:
+            args += (f"from client {client["num"]}",)
+        raise type(e)(*args)
     if "num" in client:
         print(f"{message} is readed from {client["num"]}")
     else:
@@ -259,6 +274,17 @@ async def write(client, message, timeout=1.0):
     if not message:
         raise Exception(f"message mustn't be clear")
 
+    try:
+        client["writer"].write(message.strip().encode() + b"\n")
+        await asyncio.wait_for(client["writer"].drain(), timeout=timeout)
+    except Exception as e:
+        args = e.args + (
+            "connection lost",
+            "while writing",
+        )
+        if "num" in client:
+            args += (f"to client {client["num"]}",)
+        raise type(e)(*args)
     fmes = message
     if message.startswith("STATE"):
         fmes = message.split("|")[0]
@@ -266,15 +292,14 @@ async def write(client, message, timeout=1.0):
         print(f"{fmes} is writed to {client["num"]} (length = {len(message)})")
     else:
         print(f"{fmes} is writed (length = {len(message)})")
-    client["writer"].write(message.strip().encode() + b"\n")
-    await asyncio.wait_for(client["writer"].drain(), timeout=timeout)
 
 
 async def check_ping(client):
     time_start = asyncio.get_event_loop().time()
     await write(client, "PING")
     mes = await read(client)
-    return asyncio.get_event_loop().time() - time_start
+    if mes == "PONG":
+        return asyncio.get_event_loop().time() - time_start
 
 
 class server:
@@ -311,15 +336,10 @@ class server:
             await write(client, message, timeout=timeout)
 
     async def read_all(self):
-        try:
-            answer = [""] * len(self.clients)
-            for client in self.clients:
-                answer[client["num"]] = await read(client)
-            return answer
-        except Exception as e:
-            print(f"error: {e}")
-            self.state = "wait_clients"
-            return [""] * len(self.clients)
+        answer = [""] * len(self.clients)
+        for client in self.clients:
+            answer[client["num"]] = await read(client)
+        return answer
 
     async def send_state(self, prefix):
         if prefix == "STATE_INIT":
@@ -385,10 +405,10 @@ class server:
             asyncio.create_task(self.dir_reader(client))
 
     async def game_cycle(self):
+        loop = asyncio.get_event_loop()
         self.turn = 0
+        time_cycle = loop.time()
         while self.state == "game_cycle":
-            turn_start = asyncio.get_event_loop().time()
-
             self.game.make_turn()
             if self.game.end_game == True:
                 await self.write_all("END_GAME")
@@ -396,10 +416,11 @@ class server:
                 return
             await self.send_state("STATE")
 
-            elapsed = asyncio.get_event_loop().time() - turn_start
-            sleep_time = self.game.turn_time - elapsed
+            time_cycle += self.game.turn_time
+            sleep_time = time_cycle - loop.time()
             if sleep_time < 0:
                 print(f"Turn {self.turn} lag: {-sleep_time:.3f}s")
+                time_cycle = loop.time()
             else:
                 await asyncio.sleep(sleep_time)
             self.turn += 1
@@ -411,9 +432,12 @@ class server:
                 method = getattr(self, self.state)
                 await method()
             except Exception as e:
-                print(f"error: {e}")
-                self.state = "wait_clients"
-                await asyncio.sleep(1)
+                print(f"error: {repr(e)}")
+                if "connection lost" in e.args:
+                    self.state = "wait_clients"
+                    await asyncio.sleep(1)
+                else:
+                    raise
 
     async def start(self):
         self.clients = {}
@@ -427,12 +451,12 @@ class server:
         self.wait_clients_event = asyncio.Event()
         asyncio.create_task(udp_responder())
         self.server = await asyncio.start_server(
-            self.handler, host="0.0.0.0", port=8888
+            self.handler, host="0.0.0.0", port=TCP_PORT
         )
-        async with self.server:
-            for sock in self.server.sockets:
-                print(f"tcp server started at {sock.getsockname()}")
-            await self.run()
+        await self.server.start_serving()
+        for sock in self.server.sockets:
+            print(f"tcp server started at {sock.getsockname()}")
+        await self.run()
 
 
 async def main():
