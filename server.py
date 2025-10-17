@@ -86,6 +86,9 @@ class point:
     def __add__(self, other):
         return point(self.x + other.x, self.y + other.y)
 
+    def __sub__(self, other):
+        return point(self.x - other.x, self.y - other.y)
+
 
 dir_to_ds = {
     "L": point(-1, 0),
@@ -105,24 +108,75 @@ def collinear_dir(dir1, dir2):
     return False
 
 
-snake_num_to_col = ["cC", "dD"]
+snake_num_to_chr = {
+    "apple": "A",
+    "snake 0": {"body": "c", "head": "C"},
+    "snake 1": {"body": "d", "head": "D"},
+}
+
+
+class snake:
+    def __init__(self, body: list[point], num: int):
+        self.body = body
+        self.num = num
+        self.prev_dir = ""
+        for key, val in dir_to_ds.items():
+            if val == body[-1] - body[-2]:
+                self.prev_dir = key
+        if self.prev_dir == "":
+            raise Exception("Incorrect init snake")
+        self.que = []
+
+    def add_grid_size(self, width: int, height: int):
+        self.width = width
+        self.height = height
+
+    def is_point_under(self, p: point, without_head_num=[]):
+        if self.num in without_head_num:
+            return p in self.body[:-1]
+        else:
+            return p in self.body
+
+    def make_turn(self, apples, has_bounds):
+        dir = self.prev_dir
+        if len(self.que) > 0:
+            dir = self.que[0]
+            self.que = self.que[1:]
+        self.prev_dir = dir
+        new_head = self.head() + dir_to_ds[dir]
+        if not has_bounds:
+            new_head.move_in(self.width, self.height)
+        self.body.append(new_head)
+        if self.head() not in apples:
+            self.body = self.body[1:]
+
+    def apply_direct(self, ndir):
+        pdir = self.prev_dir
+        if len(self.que) > 0:
+            pdir = self.que[-1]
+        if not collinear_dir(pdir, ndir) and len(self.que) < 3:
+            self.que.append(ndir)
+
+    def head(self):
+        return self.body[-1]
 
 
 class game:
     def build_start_pos(self):
         if self.players_number == 1:
             y = self.height // 2
-            self.snakes = [[point(0, y), point(1, y), point(2, y)]]
-            self.prev_dir = ["R"]
+            self.snakes = [
+                snake([point(0, y), point(1, y), point(2, y)], 0),
+            ]
         elif self.players_number == 2:
             x = self.width - 1
             y = self.height - 2
             self.snakes = [
-                [point(0, 1), point(1, 1), point(2, 1)],
-                [point(x, y), point(x - 1, y), point(x - 2, y)],
+                snake([point(0, 1), point(1, 1), point(2, 1)], 0),
+                snake([point(x, y), point(x - 1, y), point(x - 2, y)], 1),
             ]
-            self.prev_dir = ["R", "L"]
-        self.que = [[] for i in range(self.players_number)]
+        for s in self.snakes:
+            s.add_grid_size(self.width, self.height)
         self.end_game = False
         self.apples = []
         self.gen_apples()
@@ -142,7 +196,10 @@ class game:
         for x in range(self.width):
             for y in range(self.height):
                 p = point(x, y)
-                if not self.is_under_snake(p) and p not in self.apples:
+                is_free = p not in self.apples
+                for s in self.snakes:
+                    is_free = is_free and not s.is_point_under(p)
+                if is_free:
                     free.append(p)
         if len(free) == 0:
             return None
@@ -153,45 +210,29 @@ class game:
         grid = [["."] * self.height for _ in range(self.width)]
         for apple in self.apples:
             grid[apple.x][apple.y] = "A"
-        for num in range(len(self.snakes)):
-            for segm in self.snakes[num]:
-                is_head = 0
-                if segm == self.snakes[num][-1]:
-                    is_head = 1
-                grid[segm.x][segm.y] = snake_num_to_col[num][is_head]
+        for s in self.snakes:
+            for segm in s.body:
+                if not segm.in_bound(self.width, self.height):
+                    continue
+                if segm == s.head():
+                    c = snake_num_to_chr[f"snake {s.num}"]["head"]
+                else:
+                    c = snake_num_to_chr[f"snake {s.num}"]["body"]
+                grid[segm.x][segm.y] = c
+
         return grid
 
-    def is_under_snake(self, p):
-        for snake in self.snakes:
-            if p in snake:
-                return True
-        return False
-
     def make_turn(self):
-        for num in range(len(self.snakes)):
-            dir = self.prev_dir[num]
-            if len(self.que[num]) > 0:
-                dir = self.que[num][0]
-                self.que[num] = self.que[num][1:]
-            self.prev_dir[num] = dir
-            new_head = self.snakes[num][-1] + dir_to_ds[dir]
-            if not self.has_bound:
-                new_head.move_in(self.width, self.height)
-            if not new_head.in_bound(self.width, self.height):
+        for s in self.snakes:
+            s.make_turn(self.apples, self.has_bound)
+        for s in self.snakes:
+            if s.head() in self.apples:
+                self.apples.remove(s.head())
+            if not s.head().in_bound(self.width, self.height):
                 self.end_game = True
-                return
-            if new_head not in self.apples:
-                self.snakes[num] = self.snakes[num][1:]
-            self.snakes[num].append(new_head)
-        for num in range(len(self.snakes)):
-            head = self.snakes[num][-1]
-            if head in self.apples:
-                self.apples.remove(head)
-            self.snakes[num] = self.snakes[num][:-1]
-            if self.is_under_snake(head):
-                self.end_game = True
-            else:
-                self.snakes[num].append(head)
+            for t in self.snakes:
+                if t.is_point_under(s.head(), [s.num]):
+                    self.end_game = True
         self.gen_apples()
 
     def get_string(self):
@@ -216,13 +257,6 @@ class game:
                     res += grid[x][y].encode()
         self.prev_grid = grid
         return res.decode()
-
-    def apply_direct(self, num, ndir):
-        pdir = self.prev_dir[num]
-        if len(self.que[num]) > 0:
-            pdir = self.que[num][-1]
-        if not collinear_dir(pdir, ndir) and len(self.que[num]) < 3:
-            self.que[num].append(ndir)
 
     async def update_settings(self):
         while True:
@@ -361,7 +395,13 @@ class server:
                 break
             if read_task in done:
                 input = await read_task
-                self.game.apply_direct(client["num"], input)
+                if input not in dir_to_ds:
+                    raise Exception(
+                        "incorrect direction",
+                        "connection lost",
+                        f"while reading from {client["num"]}",
+                    )
+                self.game.snakes[client["num"]].apply_direct(input)
 
     async def stop_readers(self):
         await asyncio.sleep(0.1)
@@ -410,11 +450,11 @@ class server:
         time_cycle = loop.time()
         while self.state == "game_cycle":
             self.game.make_turn()
+            await self.send_state("STATE")
             if self.game.end_game == True:
                 await self.write_all("END_GAME")
                 self.state = "wait_restart"
                 return
-            await self.send_state("STATE")
 
             time_cycle += self.game.turn_time
             sleep_time = time_cycle - loop.time()
